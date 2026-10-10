@@ -93,8 +93,6 @@ class FlashStorageCLI:
                     log.write(f">>> {cmd}\n")
                 shell.send(cmd + "\r")
                 output += self._read_until_prompt(shell, log)
-                # Separate each command's output with a blank line
-                output += "\n"
             # Quit the device CLI
             self._quit(shell, log)
             return output
