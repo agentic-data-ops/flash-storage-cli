@@ -222,6 +222,11 @@ def show_command_help(command: str) -> str:
     )
 
 
+def _split_csv(value: str) -> List[str]:
+    """Split a comma-separated list of items, dropping empty parts."""
+    return [v.strip() for v in value.split(",") if v.strip()]
+
+
 # ---------------------------------------------------------------------------
 # High-risk command check
 # ---------------------------------------------------------------------------
@@ -450,13 +455,13 @@ def _parse_args(argv: List[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--list-commands",
-        metavar="GROUP",
-        help="list the commands of a command group, e.g. base (command help, no device connection needed)",
+        metavar="GROUP[,GROUP...]",
+        help="list the commands of one or more command groups, comma-separated, e.g. base,lun (command help, no device connection needed)",
     )
     parser.add_argument(
         "--show-command-help",
-        metavar="COMMAND",
-        help="show the command help (Format, Parameters, Example) of a command, e.g. \"create lun\" (no device connection needed)",
+        metavar="COMMAND[,COMMAND...]",
+        help="show the command help (Format, Parameters, Example) of one or more commands, comma-separated, e.g. \"create lun,delete lun\" (no device connection needed)",
     )
     parser.add_argument(
         "commands",
@@ -481,10 +486,30 @@ def main(argv: List[str] | None = None) -> None:
     # Help mode: read docs locally, no device connection required
     try:
         if args.show_command_help:
-            print(show_command_help(args.show_command_help))
+            commands = _split_csv(args.show_command_help)
+            multi = len(commands) > 1
+            for cmd in commands:
+                try:
+                    text = show_command_help(cmd)
+                except RuntimeError as ex:
+                    print(f"Error: {ex}")
+                    continue
+                if multi:
+                    print(f"=== {cmd} ===")
+                print(text)
             return
         if args.list_commands:
-            print(list_commands(args.list_commands))
+            groups = _split_csv(args.list_commands)
+            multi = len(groups) > 1
+            for group in groups:
+                try:
+                    text = list_commands(group)
+                except RuntimeError as ex:
+                    print(f"Error: {ex}")
+                    continue
+                if multi:
+                    print(f"=== {group} ===")
+                print(text)
             return
         if args.list_topics:
             print(list_topics())
