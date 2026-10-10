@@ -7,6 +7,8 @@ An SSH command-line client for managing Huawei flash storage devices.
 Key features:
 
 - **Command execution** — run one or more device CLI commands in a single session: SSH login → run commands sequentially → quit.
+- **Offline validation** — `--dry-run` checks command existence, required parameters, and high-risk level before touching the device; the same validation runs automatically before every execution.
+- **Risk protection** — commands that match the bundled high-risk command list are blocked by default; `--accept-risk` accepts the risk explicitly.
 - **Risk prompt handling** — `(y/n)` confirmation prompts raised by the device CLI are auto-accepted.
 - **Offline command help** — browse command topics, groups, and per-command help (Format, Parameters, Example) locally from bundled docs, with **no device connection needed**.
 - **Environment-variable based configuration** — credentials and options can be supplied via environment variables.
@@ -21,9 +23,10 @@ flash-storage-cli/
 ├── flash_storage/                  # Python package
 │   ├── __init__.py
 │   ├── cli.py                      # CLI entry point (flash-storage-cli command)
-│   ├── gen_help_docs.py            # Helper: generate docs/ from the command reference
+│   ├── gen_help_docs.py            # Helper: generate docs/ + config/high-risk-commands.json
 │   ├── config/
-│   │   └── command-group-description.json   # Topic descriptions
+│   │   ├── command-group-description.json   # Topic descriptions
+│   │   └── high-risk-commands.json          # High-risk command list ({command: function})
 │   └── docs/                       # Bundled command help docs (packaged into the wheel)
 │       ├── _topics.md              # All topics overview
 │       └── <topic>/                # One dir per topic, e.g. base/, storage_pool/
@@ -60,12 +63,45 @@ flash-storage-cli [options] [commands]
 | `--timeout TIMEOUT` | Command timeout in seconds (default `60`). Env: `STORAGE_TIMEOUT`. |
 | `--logfile LOGFILE` | Write the interaction log to this file (debugging). |
 | `--accept-risk` | Accept high-risk commands: print warnings and continue instead of rejecting. Env: `STORAGE_ACCEPT_RISK=true`. |
+| `--dry-run` | Validate commands (existence, required parameters, risk) without executing them. |
 | `--list-topics` | List all command topics (offline help, no device connection). |
 | `--list-commands GROUP` | List the commands of a topic, e.g. `base` (offline help). |
 | `--show-command-help COMMAND` | Show the help of a command, e.g. `"create lun"` (offline help). |
 | `commands` | Commands to execute, multiple commands separated by `\n`. |
 
-Credentials are required unless one of the offline help options (`--list-topics`, `--list-commands`, `--show-command-help`) is used.
+Credentials are required unless one of the offline help options (`--list-topics`, `--list-commands`, `--show-command-help`) or `--dry-run` is used.
+
+### Dry-run validation
+
+Validate a batch of commands **without connecting to the device** — checks command existence, required parameters, and risk level:
+
+```bash
+flash-storage-cli --dry-run "show system general\ncreate lun name=LUN1"
+```
+
+```
+Dry-run validation (no command will be executed):
+[#]  valid   risk    command
+---  ------  ------  ------------------------
+[1]  OK      LOW     show system general
+[2]  FAIL    LOW     create lun name=LUN1
+                     missing required parameter(s): capacity, one of: pool_id, pool_name
+```
+
+- `valid`: `OK` means the command exists and all required parameters are present; `FAIL` means the command was not found or required parameters are missing (the missing ones are listed under the row).
+- `risk`: `HIGH` means the command matches the bundled high-risk command list; `LOW` otherwise.
+
+The same validation also runs **before every real execution**: execution stops if any command is invalid, and stops on `HIGH`-risk commands unless `--accept-risk` is given.
+
+### Risk check
+
+Commands that match the bundled high-risk command list are marked `HIGH` in the validation table. By default execution is blocked when the batch contains `HIGH`-risk commands:
+
+```
+Contains HIGH-risk command(s). Specify --accept-risk to accept the risk and proceed.
+```
+
+Pass `--accept-risk` (or set `STORAGE_ACCEPT_RISK=true`) to accept the risk and continue execution.
 
 ### Examples
 

@@ -267,6 +267,141 @@ def find_risk_commands(
     return hits
 
 
+# ---------------------------------------------------------------------------
+# Command validation (--dry-run)
+# ---------------------------------------------------------------------------
+
+def _format_variants(help_text: str) -> List[str]:
+    """Return the '##### Format' lines of a command help text (one per variant)."""
+    variants: List[str] = []
+    in_format = False
+    for line in help_text.split("\n"):
+        s = line.strip()
+        if s == "##### Format":
+            in_format = True
+            continue
+        if in_format:
+            if s.startswith("##### "):
+                break
+            if s:
+                variants.append(s)
+    return variants
+
+
+def _parse_variant(variant: str) -> Tuple[set, List[set]]:
+    """Parse a Format variant into (required params, or-groups).
+
+    Tokens: 'name=?' parameters; '[...]' optional groups; '{...}' or-groups
+    (at least one member is required unless the group sits inside brackets).
+    The markdown-escaped brackets ('\\[', '\\]', '\\{', '\\}') are unescaped
+    before scanning.
+    """
+    s = variant.replace(r"\[", "[").replace(r"\]", "]")
+    s = s.replace(r"\{", "{").replace(r"\}", "}")
+    required: set = set()
+    groups: List[set] = []
+    depth = 0
+    group_members: set | None = None
+    group_depth = 0
+    for m in re.finditer(r"\[|\]|\{|\}|(\w+)=\?", s):
+        tok = m.group(0)
+        if tok == "[":
+            depth += 1
+        elif tok == "]":
+            depth = max(0, depth - 1)
+        elif tok == "{":
+            group_members = set()
+            group_depth = depth
+        elif tok == "}":
+            if group_members is not None:
+                if group_depth == 0:
+                    groups.append(group_members)
+                group_members = None
+        else:
+            pname = m.group(1)
+            if group_members is not None:
+                group_members.add(pname)
+            elif depth == 0:
+                required.add(pname)
+    return required, groups
+
+
+def validate_command(command: str) -> List[str]:
+    """Validate a command against its bundled help: existence + required parameters.
+
+    The command name is located by progressively stripping trailing tokens
+    (parameters), e.g. 'delete lun 1' resolves to the help of 'delete lun'.
+    Returns a list of problems (empty list means the command is valid).
+    """
+    tokens = command.split()
+    help_text = None
+    for n in range(len(tokens), 0, -1):
+        try:
+            help_text = show_command_help(" ".join(tokens[:n]))
+            break
+        except RuntimeError:
+            continue
+    if help_text is None:
+        return [f"Command not found: '{command}'. Use --show-command-help to check the command name."]
+    variants = _format_variants(help_text)
+    if not variants:
+        return []  # no Format section, nothing more to validate
+    input_params = set(re.findall(r"(\w+)=", command))
+    for variant in variants:
+        required, groups = _parse_variant(variant)
+        if required <= input_params and all(g & input_params for g in groups):
+            return []
+    # No variant matches: report what the first variant still requires
+    required, groups = _parse_variant(variants[0])
+    missing = sorted(required - input_params)
+    for g in groups:
+        if not (g & input_params):
+            missing.append("one of: " + ", ".join(sorted(g)))
+    return [f"missing required parameter(s): {', '.join(missing)}"]
+
+
+def validate_batch(
+    commands: List[str],
+) -> Tuple[List[Tuple[int, str, str, str, List[str]]], bool]:
+    """Validate a batch of commands; returns (rows, has_failures).
+
+    Each row is (line_no, command, valid, risk, problems) where valid is
+    'OK'/'FAIL' and risk is 'LOW'/'HIGH' (HIGH = the command matches the
+    high-risk command list).
+    """
+    risk_hits = {
+        cmd for _, cmd, _, _ in find_risk_commands(commands, load_risk_commands())
+    }
+    rows: List[Tuple[int, str, str, str, List[str]]] = []
+    has_fail = False
+    for i, raw in enumerate(commands, start=1):
+        cmd = raw.strip()
+        problems = validate_command(cmd)
+        if problems:
+            has_fail = True
+        risk = "HIGH" if cmd in risk_hits else "LOW"
+        rows.append((i, cmd, "OK" if not problems else "FAIL", risk, problems))
+    return rows, has_fail
+
+
+def print_validation(rows: List[Tuple[int, str, str, str, List[str]]]) -> None:
+    """Print the validation table, aligned with ASCII spaces."""
+    idx_w = max(len(f"[{n}]") for n, *_ in rows)
+    valid_w = 6
+    risk_w = 6
+    cmd_w = max(len(cmd) for _, cmd, *_ in rows)
+    print(f"{'[#]':<{idx_w}}  {'valid':<{valid_w}}  {'risk':<{risk_w}}  command")
+    print(f"{'-' * idx_w}  {'-' * valid_w}  {'-' * risk_w}  {'-' * cmd_w}")
+    for n, cmd, valid, risk, problems in rows:
+        print(
+            f"[{n}]".ljust(idx_w) + "  "
+            + valid.ljust(valid_w) + "  "
+            + risk.ljust(risk_w) + "  " + cmd
+        )
+        for p in problems:
+            print(" " * (idx_w + 2 + valid_w + 2 + risk_w + 2) + p)
+
+
 def _parse_args(argv: List[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="SSH login to a Huawei flash storage device CLI and execute commands",
@@ -304,6 +439,11 @@ def _parse_args(argv: List[str] | None = None) -> argparse.Namespace:
         help="accept high-risk commands: print warnings and continue instead of rejecting (env STORAGE_ACCEPT_RISK=true)",
     )
     parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="validate commands (existence, required parameters, risk) without executing them",
+    )
+    parser.add_argument(
         "--list-topics",
         action="store_true",
         help="list all command topics (command help, no device connection needed)",
@@ -327,7 +467,7 @@ def _parse_args(argv: List[str] | None = None) -> argparse.Namespace:
     ns = parser.parse_args(argv)
 
     help_mode = ns.list_topics or ns.list_commands or ns.show_command_help
-    if not help_mode:
+    if not (help_mode or ns.dry_run):
         missing = [k for k in ("address", "username", "password") if not getattr(ns, k)]
         if missing:
             parser.error(f"missing required arguments: {', '.join(missing)} (can be set via environment variables)")
@@ -356,30 +496,43 @@ def main(argv: List[str] | None = None) -> None:
     raw_commands = args.commands.split(r"\n") if args.commands else []
     commands = [c for c in raw_commands if c.strip()]
 
+    if not commands:
+        print("Please provide commands to execute.")
+        return
+
+    # Validate the whole batch: existence, required parameters, risk level
+    rows, has_fail = validate_batch(commands)
+    high_risk = any(risk == "HIGH" for _, _, _, risk, _ in rows)
+
+    if args.dry_run:
+        print("Dry-run validation (no command will be executed):")
+        print_validation(rows)
+        if high_risk:
+            print(
+                "\nContains HIGH-risk command(s). "
+                "Specify --accept-risk to accept the risk and proceed."
+            )
+        return
+
+    # Normal execution: the same dry-run must pass first
+    print("Dry-run validation:")
+    print_validation(rows)
+    if has_fail:
+        print("\nValidation failed. Fix the commands and try again.")
+        return
+    if high_risk and not args.accept_risk:
+        print(
+            "\nContains HIGH-risk command(s). "
+            "Specify --accept-risk to accept the risk and proceed."
+        )
+        return
+
     cli = FlashStorageCLI(
         address=args.address,
         username=args.username,
         password=args.password,
         timeout=args.timeout,
     )
-    if not commands:
-        print("Please provide commands to execute.")
-        return
-
-    # High-risk command check: reject by default, proceed only with --accept-risk
-    risk_hits = find_risk_commands(commands, load_risk_commands())
-    if risk_hits:
-        print("Risk command detected:")
-        print("| # | command | description |")
-        print("|---|---|---|")
-        for line_no, cmd, _risk_cmd, function in risk_hits:
-            cmd_cell = cmd.replace("|", "\\|")
-            fn_cell = function.replace("|", "\\|")
-            print(f"| {line_no} | {cmd_cell} | {fn_cell} |")
-        if not args.accept_risk:
-            print("Execution rejected. Use --accept-risk to force execution.")
-            return
-        print("--accept-risk specified, continuing execution.")
 
     try:
         results = cli.execute_commands(commands, args.logfile)
