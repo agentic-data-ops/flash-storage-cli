@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "flash-storage-cli"
+version = "0.1.0"
+description = "SSH CLI for Huawei flash storage device management"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+    "paramiko>=2.8",
+]
+
+[project.scripts]
+flash-storage-cli = "flash_storage.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["flash_storage*"]
+
+[tool.setuptools.package-data]
+"flash_storage" = [
+    "config/*.json",
+    "docs/*.md",
+    "docs/**/*.md",
+]

@@ -1,0 +1,3 @@
+prune reference
+prune .reasonix
+prune .git
